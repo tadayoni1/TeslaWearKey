@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId "li.power.app.wearos.teslanak"
-        minSdkVersion 24
+        minSdkVersion 31
         targetSdkVersion 35
         versionCode 26
         versionName "1.4.2"
@@ -32,8 +32,7 @@ android {
 dependencies {
     implementation 'com.google.android.material:material:1.12.0'
     implementation 'androidx.wear:wear:1.3.0'
-    implementation "org.bouncycastle:bcprov-jdk18on:1.79"
-    implementation group: 'commons-codec', name: 'commons-codec', version: '1.15'
+    implementation "org.bouncycastle:bcprov-jdk18on:1.86"
     implementation "androidx.core:core-splashscreen:1.2.0-beta02"
 }
 java {

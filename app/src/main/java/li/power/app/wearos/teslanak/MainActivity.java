@@ -1,52 +1,28 @@
 package li.power.app.wearos.teslanak;
 
 import android.app.Activity;
-import android.content.ComponentName;
-import android.content.Context;
-import android.content.SharedPreferences;
-import android.nfc.NfcAdapter;
-import android.nfc.cardemulation.CardEmulation;
-import android.os.Build;
+import android.app.KeyguardManager;
 import android.os.Bundle;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
-import android.util.Log;
-import android.widget.Switch;
+import android.security.keystore.StrongBoxUnavailableException;
 import android.widget.TextView;
-import android.widget.Toast;
-import androidx.appcompat.widget.SwitchCompat;
 import androidx.core.splashscreen.SplashScreen;
-import com.google.android.material.color.DynamicColors;
-import com.google.android.material.switchmaterial.SwitchMaterial;
 import li.power.app.wearos.teslanak.databinding.ActivityMainBinding;
-import org.apache.commons.codec.binary.Hex;
-import org.bouncycastle.crypto.AsymmetricCipherKeyPair;
-import org.bouncycastle.crypto.generators.ECKeyPairGenerator;
-import org.bouncycastle.crypto.params.ECDomainParameters;
-import org.bouncycastle.crypto.params.ECKeyGenerationParameters;
-import org.bouncycastle.crypto.params.ECPrivateKeyParameters;
-import org.bouncycastle.jce.ECNamedCurveTable;
-import org.bouncycastle.jce.spec.ECNamedCurveParameterSpec;
+import li.power.app.wearos.teslanak.nfc.TeslaNAKService;
 
-import javax.crypto.*;
 import java.io.IOException;
 import java.security.*;
 import java.security.cert.CertificateException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
-
-import static android.nfc.NfcAdapter.FLAG_LISTEN_KEEP;
-import static android.nfc.NfcAdapter.FLAG_READER_DISABLE;
+import java.security.spec.ECGenParameterSpec;
 
 public class MainActivity extends Activity {
 
-    private static final String KEYSTORE_PROVIDER = "AndroidKeyStore";
-    private static final String KEY_ALIAS = "tesla_nak";
-    private static final String UNLOCK_REQUIRED = "unlock_required";
-    private static final String RSA_MODE = "RSA/ECB/PKCS1Padding";
-    private KeyStore keyStore;
-    private SharedPreferences sharedPreferences;
+    /* Keystore alias and preferences file used by versions <= 1.4.2 (software EC key wrapped by RSA). */
+    private static final String LEGACY_KEY_ALIAS = "tesla_nak";
+
+    private TextView mTextView;
+    private boolean ready;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -54,85 +30,88 @@ public class MainActivity extends Activity {
         SplashScreen.installSplashScreen(this);
         super.onCreate(savedInstanceState);
 
-        sharedPreferences = getSharedPreferences(KEY_ALIAS, Context.MODE_PRIVATE);
-
-        li.power.app.wearos.teslanak.databinding.ActivityMainBinding binding = ActivityMainBinding.inflate(getLayoutInflater());
+        ActivityMainBinding binding = ActivityMainBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
 
-        TextView mTextView = binding.text;
-        Switch sw = binding.unlockSwitch;
+        mTextView = binding.text;
+    }
 
-        if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && checkSecureNfc()) {
-                sw.setChecked(true);
-                sw.setEnabled(false);
-                sharedPreferences.edit().putBoolean(UNLOCK_REQUIRED, true).apply();
-        }else{
-            sw.setChecked(sharedPreferences.getBoolean(UNLOCK_REQUIRED, false));
+    @Override
+    protected void onResume() {
+        super.onResume();
+        ready = prepareKey();
+        if (ready) {
+            TeslaNAKService.setForeground(true);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        if (ready) {
+            TeslaNAKService.setForeground(false);
+        }
+        super.onPause();
+    }
+
+    private boolean prepareKey() {
+        KeyguardManager km = getSystemService(KeyguardManager.class);
+        if (km == null || !km.isDeviceSecure()) {
+            mTextView.setText(R.string.screenLockRequired);
+            return false;
         }
 
-        sw.setOnCheckedChangeListener((buttonView, isChecked) -> {
-            sharedPreferences.edit().putBoolean(UNLOCK_REQUIRED, isChecked).apply();
-        });
-
+        KeyStore keyStore;
         try {
-            keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER);
+            keyStore = KeyStore.getInstance(TeslaNAKService.KEYSTORE_PROVIDER);
             keyStore.load(null);
-            if (!keyStore.containsAlias(KEY_ALIAS)) {
-                generateEccPrivateKey();
-            }
-
+            removeLegacyKey(keyStore);
         } catch (KeyStoreException | CertificateException | IOException | NoSuchAlgorithmException e) {
             mTextView.setText(R.string.keystoreFailed);
             e.printStackTrace();
-        } catch (InvalidAlgorithmParameterException | NoSuchProviderException | InvalidKeyException | BadPaddingException | NoSuchPaddingException | IllegalBlockSizeException e) {
+            return false;
+        }
+
+        try {
+            if (!keyStore.containsAlias(TeslaNAKService.KEY_ALIAS)) {
+                generateKey();
+            }
+        } catch (GeneralSecurityException | ProviderException e) {
             mTextView.setText(R.string.keypairFailed);
             e.printStackTrace();
+            return false;
         }
 
         mTextView.setText(R.string.launched);
+        return true;
     }
 
-    private void generateEccPrivateKey() throws InvalidAlgorithmParameterException, NoSuchAlgorithmException, NoSuchProviderException, NoSuchPaddingException, IllegalBlockSizeException, KeyStoreException, BadPaddingException, InvalidKeyException {
-        ECNamedCurveParameterSpec curve = ECNamedCurveTable.getParameterSpec("secp256r1");
-        ECDomainParameters domainParams = new ECDomainParameters(curve.getCurve(), curve.getG(), curve.getN(), curve.getH(), curve.getSeed());
-        ECKeyGenerationParameters keyParams = new ECKeyGenerationParameters(domainParams, new SecureRandom());
-        ECKeyPairGenerator generator = new ECKeyPairGenerator();
-        generator.init(keyParams);
-        AsymmetricCipherKeyPair keyPair = generator.generateKeyPair();
-        generateRsaKey();
-        sharedPreferences.edit().putString(KEY_ALIAS, Hex.encodeHexString(encryptRSA(((ECPrivateKeyParameters)keyPair.getPrivate()).getD().toByteArray()))).apply();
+    private void removeLegacyKey(KeyStore keyStore) throws KeyStoreException {
+        if (keyStore.containsAlias(LEGACY_KEY_ALIAS)) {
+            keyStore.deleteEntry(LEGACY_KEY_ALIAS);
+        }
+        deleteSharedPreferences(LEGACY_KEY_ALIAS);
     }
 
-    private byte[] encryptRSA(byte[] plainText) throws KeyStoreException, NoSuchPaddingException, NoSuchAlgorithmException, InvalidKeyException, IllegalBlockSizeException, BadPaddingException {
-        PublicKey publicKey = keyStore.getCertificate(KEY_ALIAS).getPublicKey();
-
-        Cipher cipher = Cipher.getInstance(RSA_MODE);
-        cipher.init(Cipher.ENCRYPT_MODE, publicKey);
-
-        return cipher.doFinal(plainText);
+    private void generateKey() throws GeneralSecurityException {
+        try {
+            generateKey(true);
+        } catch (StrongBoxUnavailableException e) {
+            generateKey(false);
+        }
     }
 
-
-    private void generateRsaKey() throws NoSuchAlgorithmException, NoSuchProviderException, InvalidAlgorithmParameterException {
-
-        KeyGenParameterSpec keyGenParameterSpec = new KeyGenParameterSpec
-                .Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
-                .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA512)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_PKCS1)
+    private void generateKey(boolean strongBox) throws GeneralSecurityException {
+        KeyGenParameterSpec spec = new KeyGenParameterSpec
+                .Builder(TeslaNAKService.KEY_ALIAS, KeyProperties.PURPOSE_AGREE_KEY)
+                .setAlgorithmParameterSpec(new ECGenParameterSpec("secp256r1"))
+                .setUnlockedDeviceRequired(true)
+                .setIsStrongBoxBacked(strongBox)
                 .build();
 
         KeyPairGenerator keyPairGenerator = KeyPairGenerator
-                .getInstance(KeyProperties.KEY_ALGORITHM_RSA, KEYSTORE_PROVIDER);
-        keyPairGenerator.initialize(keyGenParameterSpec);
+                .getInstance(KeyProperties.KEY_ALGORITHM_EC, TeslaNAKService.KEYSTORE_PROVIDER);
+        keyPairGenerator.initialize(spec);
         keyPairGenerator.generateKeyPair();
-    }
-
-    private boolean checkSecureNfc(){
-        try{
-            return NfcAdapter.getDefaultAdapter(this).isSecureNfcEnabled();
-        } catch (RuntimeException e) {
-            return false;
-        }
     }
 
 }

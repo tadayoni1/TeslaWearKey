@@ -8,12 +8,14 @@ Based on HCE, ,the watch emulates as a Tesla Key Card to interact with the vehic
 ---
 ### Features
 * Unlock / Lock your Tesla Model 3 or Y.
-* Android KeyStore protected keys
+* Key generated and used inside Android KeyStore (StrongBox when available); the private key never leaves secure hardware
+* Only answers the car while the watch is unlocked, and only while the app is open or for 30 seconds after leaving it
 * No internet access or bluetooth required
 * Based on Tesla Key Card protocol
 
 ### Dependencies
-* NFC-enabled WearOS watch
+* NFC-enabled WearOS watch running Wear OS 4 or later (Android 12 / API 31+)
+* A screen lock (PIN or pattern) set up on the watch
 * Tested on following devices
   * Pixel Watch 2 (Android 15, wearOS 5.1)
   * Galaxy Watch 6 Classic (Android 14, wearOS 5.0, BXK1)
@@ -27,7 +29,8 @@ Based on HCE, ,the watch emulates as a Tesla Key Card to interact with the vehic
 * Use existing key card to load watch in the vehicle system
 * Test extensively to ensure watch works effectively.
 * TIP: The side of the Galaxy Watches contains the NFC antenna.
-* TIP 2: The app must be in an ACTIVE state for NFC to work. It can easily go in to standby.
+* TIP 2: Open the app before tapping. The key works while the app is open and for 30 seconds after you leave it (e.g. when the screen turns off as you tilt your wrist).
+* Upgrading from 1.4.2 or earlier creates a new key: remove the old watch key in the car and enroll the watch again with your key card.
 
 ### Download link
 

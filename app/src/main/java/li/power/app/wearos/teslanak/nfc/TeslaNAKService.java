@@ -1,23 +1,16 @@
 package li.power.app.wearos.teslanak.nfc;
 
-import android.content.SharedPreferences;
+import android.app.KeyguardManager;
 import android.nfc.cardemulation.HostApduService;
 import android.os.Bundle;
+import android.os.SystemClock;
 
 import android.widget.Toast;
 
-import android.app.KeyguardManager;
-import android.content.Context;
-
 import org.bouncycastle.jce.ECNamedCurveTable;
-import org.bouncycastle.jce.interfaces.ECPrivateKey;
-import org.bouncycastle.jce.interfaces.ECPublicKey;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.jce.spec.ECParameterSpec;
-import org.bouncycastle.jce.spec.ECPrivateKeySpec;
 import org.bouncycastle.jce.spec.ECPublicKeySpec;
-import org.bouncycastle.math.ec.ECPoint;
-import org.bouncycastle.util.encoders.Hex;
 
 import javax.crypto.*;
 import javax.crypto.spec.SecretKeySpec;
@@ -26,7 +19,7 @@ import java.io.IOException;
 import java.math.BigInteger;
 import java.security.*;
 import java.security.cert.CertificateException;
-import java.security.spec.InvalidKeySpecException;
+import java.security.interfaces.ECPublicKey;
 
 /*
  *
@@ -45,22 +38,38 @@ public class TeslaNAKService extends HostApduService {
     private static final byte[] SW_UNKNOWN = new byte[]{(byte) 0x6F, (byte) 0x00};
     private static final byte[] SW_WRONG_LENGTH = new byte[]{(byte) 0x67, (byte) 0x00};
     private static final byte[] SW_CONDITIONS_NOT_SATISFIED = new byte[]{(byte) 0x69, (byte) 0x85};
-    
-    private static final String KEYSTORE_PROVIDER = "AndroidKeyStore";
-    private static final String KEY_ALIAS = "tesla_nak";
-    private static final String UNLOCK_REQUIRED = "unlock_required";
-    private static final String RSA_MODE = "RSA/ECB/PKCS1Padding";
+
+    public static final String KEYSTORE_PROVIDER = "AndroidKeyStore";
+    /* EC P-256 key generated inside Android Keystore; the private key never leaves secure hardware. */
+    public static final String KEY_ALIAS = "tesla_nak_ec";
     private static final String CURVE = "secp256r1";
 
-    private KeyStore keyStore;
-    private final SecureRandom random = new SecureRandom();
-    private SharedPreferences sharedPreferences;
+    /* How long the key keeps answering readers after the app leaves the foreground. */
+    public static final long ARM_WINDOW_MS = 30_000;
 
+    private static volatile boolean sForeground;
+    private static volatile long sArmedUntil;
+
+    private KeyStore keyStore;
+
+    /*
+     * The card only answers while the app is open, or for ARM_WINDOW_MS after it was left,
+     * so an unattended watch does not respond to arbitrary (or relayed) NFC readers.
+     */
+    public static void setForeground(boolean foreground) {
+        sForeground = foreground;
+        if (!foreground) {
+            sArmedUntil = SystemClock.elapsedRealtime() + ARM_WINDOW_MS;
+        }
+    }
+
+    private static boolean isArmed() {
+        return sForeground || SystemClock.elapsedRealtime() < sArmedUntil;
+    }
 
     @Override
     public void onCreate() {
         setupBouncyCastle();
-        sharedPreferences = getSharedPreferences(KEY_ALIAS, MODE_PRIVATE);
         try {
             keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER);
             keyStore.load(null);
@@ -80,19 +89,19 @@ public class TeslaNAKService extends HostApduService {
     @Override
     public byte[] processCommandApdu(byte[] commandApdu, Bundle extras) {
 
-        if (isWatchLocked() && sharedPreferences.getBoolean(UNLOCK_REQUIRED, false)) {
-
+        if (!isArmed() || !isWatchUnlocked()) {
             return SW_CONDITIONS_NOT_SATISFIED;
         }
 
         return process(commandApdu);
     }
 
-    private boolean isWatchLocked() {
+    /* Requires a secure lock screen to be set up, and the watch to currently be unlocked. */
+    private boolean isWatchUnlocked() {
 
-        KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+        KeyguardManager km = getSystemService(KeyguardManager.class);
 
-        return km != null && km.isDeviceLocked();
+        return km != null && km.isDeviceSecure() && !km.isDeviceLocked();
     }
 
     private byte[] process(byte[] commandApdu) {
@@ -122,13 +131,7 @@ public class TeslaNAKService extends HostApduService {
         return new byte[]{0x00, 0x01, (byte) 0x90, 0x00};
     }
 
-    public static PrivateKey loadPrivateKey(byte[] data) throws NoSuchAlgorithmException, NoSuchProviderException, InvalidKeySpecException {
-        ECParameterSpec params = ECNamedCurveTable.getParameterSpec(CURVE);
-        ECPrivateKeySpec prvkey = new ECPrivateKeySpec(new BigInteger(data), params);
-        KeyFactory kf = KeyFactory.getInstance("EC", "BC");
-        return kf.generatePrivate(prvkey);
-    }
-
+    /* Decodes and validates (on-curve check) an uncompressed P-256 point sent by the reader. */
     public static PublicKey loadPublicKey(byte[] data) throws Exception {
         ECParameterSpec params = ECNamedCurveTable.getParameterSpec(CURVE);
         ECPublicKeySpec pubKey = new ECPublicKeySpec(
@@ -137,27 +140,27 @@ public class TeslaNAKService extends HostApduService {
         return kf.generatePublic(pubKey);
     }
 
-    private ECPublicKey getPublicKeyFromPrivate(ECPrivateKey privateKey) throws Exception {
-        KeyFactory keyFactory = KeyFactory.getInstance("EC", "BC");
+    private static byte[] encodeUncompressed(java.security.spec.ECPoint w) {
+        byte[] out = new byte[65];
+        out[0] = 0x04;
+        copyUnsigned32(w.getAffineX(), out, 1);
+        copyUnsigned32(w.getAffineY(), out, 33);
+        return out;
+    }
 
-        BigInteger d = privateKey.getD();
-        org.bouncycastle.jce.spec.ECParameterSpec ecSpec =
-                privateKey.getParameters();
-        ECPoint Q = privateKey.getParameters().getG().multiply(d);
-
-        org.bouncycastle.jce.spec.ECPublicKeySpec pubSpec = new
-                org.bouncycastle.jce.spec.ECPublicKeySpec(Q, ecSpec);
-        return (ECPublicKey) keyFactory.generatePublic(pubSpec);
+    private static void copyUnsigned32(BigInteger v, byte[] out, int offset) {
+        byte[] b = v.toByteArray();
+        int len = Math.min(b.length, 32);
+        System.arraycopy(b, b.length - len, out, offset + 32 - len, len);
     }
 
     private byte[] processGetPublicKey() {
         try {
 
-            ECPrivateKey privKey = (ECPrivateKey) loadPrivateKey(decryptRSA(Hex.decode(sharedPreferences.getString(KEY_ALIAS, ""))));
-            ECPublicKey pubKey = getPublicKeyFromPrivate(privKey);
+            ECPublicKey pubKey = (ECPublicKey) keyStore.getCertificate(KEY_ALIAS).getPublicKey();
 
             byte[] resp = new byte[67];
-            System.arraycopy(pubKey.getQ().getEncoded(false), 0, resp, 0, 65);
+            System.arraycopy(encodeUncompressed(pubKey.getW()), 0, resp, 0, 65);
             resp[65] = (byte) 0x90;
             resp[66] = 0x00;
 
@@ -178,13 +181,12 @@ public class TeslaNAKService extends HostApduService {
         System.arraycopy(buffer, 0, pubKey, 0, 65);
         byte[] challenge = new byte[16];
         byte[] salt = new byte[4];
-        random.nextBytes(salt);
+        new SecureRandom().nextBytes(salt);
         System.arraycopy(salt, 0, challenge, 0, 4);
         System.arraycopy(buffer, 69, challenge, 4, 12);
         try {
-            ECPrivateKey privKey = (ECPrivateKey) loadPrivateKey(decryptRSA(Hex.decode(sharedPreferences.getString(KEY_ALIAS, ""))));
             byte[] resp = new byte[18];
-            System.arraycopy(doAuthenticate(privKey, pubKey, challenge), 0, resp, 0, 16);
+            System.arraycopy(doAuthenticate(pubKey, challenge), 0, resp, 0, 16);
             resp[16] = (byte) 0x90;
             resp[17] = 0x00;
             return resp;
@@ -195,43 +197,29 @@ public class TeslaNAKService extends HostApduService {
     }
 
 
-    private byte[] doECDH(PrivateKey privKey, byte[] pubKey) throws Exception {
-        KeyAgreement ka = KeyAgreement.getInstance("ECDH", "BC");
+    /* ECDH runs inside Android Keystore; only the shared secret is returned to the app. */
+    private byte[] doECDH(byte[] pubKey) throws Exception {
+        PrivateKey privKey = (PrivateKey) keyStore.getKey(KEY_ALIAS, null);
+        KeyAgreement ka = KeyAgreement.getInstance("ECDH", KEYSTORE_PROVIDER);
         ka.init(privKey);
         ka.doPhase(loadPublicKey(pubKey), true);
         return ka.generateSecret();
     }
 
-    private byte[] getEncryptKey(PrivateKey privKey, byte[] pubKey) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-1");
-            digest.reset();
-            digest.update(doECDH(privKey, pubKey));
-            byte[] key = new byte[16];
-            System.arraycopy(digest.digest(), 0, key, 0, 16);
-            return key;
-        } catch (Exception e) {
-            e.printStackTrace();
-            return null;
-        }
+    private byte[] getEncryptKey(byte[] pubKey) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-1");
+        digest.update(doECDH(pubKey));
+        byte[] key = new byte[16];
+        System.arraycopy(digest.digest(), 0, key, 0, 16);
+        return key;
     }
 
-    private byte[] doAuthenticate(PrivateKey privKey, byte[] pubKey, byte[] challenge) throws IllegalBlockSizeException, BadPaddingException, InvalidKeyException, NoSuchPaddingException, NoSuchAlgorithmException {
-        SecretKeySpec keySpec = new SecretKeySpec(getEncryptKey(privKey, pubKey), "AES");
+    private byte[] doAuthenticate(byte[] pubKey, byte[] challenge) throws Exception {
+        SecretKeySpec keySpec = new SecretKeySpec(getEncryptKey(pubKey), "AES");
         Cipher cipher = Cipher.getInstance("AES/ECB/NoPadding");
         cipher.init(Cipher.ENCRYPT_MODE, keySpec);
         return cipher.doFinal(challenge);
 
-    }
-
-
-    private byte[] decryptRSA(byte[] ciphertext) throws UnrecoverableKeyException, KeyStoreException, NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, BadPaddingException {
-        PrivateKey privateKey = (PrivateKey) keyStore.getKey(KEY_ALIAS, null);
-
-        Cipher cipher = Cipher.getInstance(RSA_MODE);
-        cipher.init(Cipher.DECRYPT_MODE, privateKey);
-
-        return cipher.doFinal(ciphertext);
     }
 
     private void setupBouncyCastle() {

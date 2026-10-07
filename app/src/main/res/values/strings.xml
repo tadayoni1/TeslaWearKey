@@ -9,10 +9,8 @@
     <string name="aiddescription" translatable="false">Tesla Key</string>
     <string name="keystoreFailed">Failed to initialize keystore.</string>
     <string name="keypairFailed">Failed to generate keypair.</string>
-    <string name="launched">Tesla key card is ready. Keep app active and present as required.</string>
-    <string name="unlockScreen">Screen Unlock?</string>
-    <string name="required">Required</string>
-    <string name="notRequired">Not Required</string>
+    <string name="screenLockRequired">Set up a screen lock on the watch to use it as a key.</string>
+    <string name="launched">Tesla key card is ready. Hold the watch to the reader now, or within 30 seconds of leaving this screen.</string>
 
 
 </resources>

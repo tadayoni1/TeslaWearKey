@@ -2,8 +2,6 @@
 <resources>
     <string name="keystoreFailed">无法初始化 KeyStore</string>
     <string name="keypairFailed">金钥产生失败</string>
-    <string name="launched">Tesla 钥匙已就绪，请保持程式开启</string>
-    <string name="unlockScreen">需要解锁萤幕?</string>
-    <string name="required">需要</string>
-    <string name="notRequired">不需要</string>
+    <string name="screenLockRequired">请先在手表上设置屏幕锁定，才能作为钥匙使用。</string>
+    <string name="launched">Tesla 钥匙已就绪。请立即或在离开此画面后 30 秒内将手表靠近读卡区。</string>
 </resources>
